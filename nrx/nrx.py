@@ -34,12 +34,13 @@ import json
 import math
 import ast
 import toml
-import pynetbox
+from netbox import NetBoxClient
 import requests
 import urllib3
 import networkx as nx
 import jinja2
 import yaml
+from box import Box
 
 # DEFINE GLOBAL VARs HERE
 
@@ -91,9 +92,11 @@ class NBFactory:
         elif len(config['export_tags']) > 0:
             self.topology_name = "-".join(config['export_tags'])
         self.G = nx.Graph(name=self.topology_name)
-        self.nb_session = pynetbox.api(self.config['nb_api_url'],
-                                       token=self.config['nb_api_token'],
-                                       threading=True)
+        self.nb_session = NetBoxClient(
+            base_url=self.config['nb_api_url'],
+            token=self.config['nb_api_token'],
+        )
+
         self.nb_site = None
         if not config['tls_validate']:
             self.nb_session.http_session.verify = False
@@ -101,10 +104,11 @@ class NBFactory:
         print(f"Connecting to NetBox at: {config['nb_api_url']}")
         if len(config['export_site']) > 0:
             debug(f"Fetching site: {config['export_site']}")
-            try:
-                self.nb_site = self.nb_session.dcim.sites.get(name=config['export_site'])
-            except (pynetbox.core.query.RequestError, pynetbox.core.query.ContentError) as e:
-                error("NetBox API failure at get site:", e)
+            self.nb_site = self.nb_session.dcim.sites.get(name=config['export_site'])
+            # try:
+            #     self.nb_site = self.nb_session.dcim.sites.get(name=config['export_site'])
+            # except (pynetbox.core.query.RequestError, pynetbox.core.query.ContentError) as e:
+            #     error("NetBox API failure at get site:", e)
             if self.nb_site is None:
                 error(f"Site not found: {config['export_site']}")
             else:
@@ -130,13 +134,14 @@ class NBFactory:
         """Get device list from NetBox filtered by site, tags and device roles"""
         devices = None
         if self.nb_site is None:
-            devices = self.nb_session.dcim.devices.filter(tag=self.config['export_tags'],
-                                                          role=self.config['export_device_roles'])
+            devices = self.nb_session.dcim.devices.all(tag=self.config['export_tags'],
+                                                          role=self.config['export_device_roles']).data
         else:
-            devices = self.nb_session.dcim.devices.filter(site_id=self.nb_site.id,
+            devices = self.nb_session.dcim.devices.all(site_id=self.nb_site.id,
                                                           tag=self.config['export_tags'],
-                                                          role=self.config['export_device_roles'])
+                                                          role=self.config['export_device_roles']).data
         for device in list(devices):
+            device = Box(device)
             d = self._init_device(device)
             self.nb_net.nodes.append(d)
             d["node_id"] = len(self.nb_net.nodes) - 1
@@ -147,7 +152,8 @@ class NBFactory:
             debug("Added device:", d)
 
             debug(f"{d['name']} Ethernet interfaces:")
-            for interface in list(self.nb_session.dcim.interfaces.filter(device_id=device.id)):
+            for interface in self.nb_session.dcim.interfaces.all(device_id=device.id).data:
+                interface = Box(interface)
                 if "base" in interface.type.value and interface.cable:  # only connected ethernet interfaces
                     debug(device.name, ":", interface, ":", interface.type.value)
                     i = {
@@ -244,7 +250,8 @@ class NBFactory:
     def _build_network_graph(self):
         if len(self.nb_net.cable_ids) > 0:
             # Making sure there will be a non-empty filter for cables, as otherwise all cables would be returned
-            for cable in list(self.nb_session.dcim.cables.filter(id=self.nb_net.cable_ids)):
+            for cable in self.nb_session.dcim.cables.all(id=self.nb_net.cable_ids).data:
+                cable = Box(cable)
                 edge = self._trace_cable(cable)
                 if len(edge) == 2:
                     int_a = edge[0]
